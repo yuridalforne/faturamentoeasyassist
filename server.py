@@ -1,22 +1,27 @@
+```python
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+
 import sqlite3
 import os
 import uuid
+
 from datetime import datetime
 from pathlib import Path
-from werkzeug.utils import secure_filename
+
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
 
 app = FastAPI()
 
 templates = Jinja2Templates(directory="templates")
 
-# Diretório onde os arquivos recebidos serão armazenados
 PASTA_ARQUIVOS = Path("arquivos_recebidos")
 PASTA_ARQUIVOS.mkdir(exist_ok=True)
 
-# Extensões permitidas
 EXTENSOES_PERMITIDAS = {
     ".zip",
     ".rar",
@@ -40,12 +45,17 @@ def get_connection():
 
 
 def init_db():
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
-        # Tabela de lojas
+        # ----------------------------------------------------
+        # LOJAS
+        # ----------------------------------------------------
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS lojas (
                 cnpj TEXT PRIMARY KEY,
@@ -53,7 +63,10 @@ def init_db():
             )
         """)
 
-        # Tabela de pedidos
+        # ----------------------------------------------------
+        # PEDIDOS
+        # ----------------------------------------------------
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS pedidos (
                 id TEXT PRIMARY KEY,
@@ -66,22 +79,26 @@ def init_db():
             )
         """)
 
-        # Compatibilidade com banco antigo
-        # Caso a tabela pedidos já exista sem essas colunas,
-        # elas serão adicionadas automaticamente.
+        # ----------------------------------------------------
+        # COMPATIBILIDADE COM BANCO EXISTENTE
+        # ----------------------------------------------------
 
         colunas = [
             row["name"]
-            for row in cursor.execute("PRAGMA table_info(pedidos)").fetchall()
+            for row in cursor.execute(
+                "PRAGMA table_info(pedidos)"
+            ).fetchall()
         ]
 
         if "criado_em" not in colunas:
+
             cursor.execute("""
                 ALTER TABLE pedidos
                 ADD COLUMN criado_em TEXT
             """)
 
         if "concluido_em" not in colunas:
+
             cursor.execute("""
                 ALTER TABLE pedidos
                 ADD COLUMN concluido_em TEXT
@@ -89,7 +106,16 @@ def init_db():
 
         conn.commit()
 
+    except sqlite3.Error as e:
+
+        conn.rollback()
+
+        print(f"ERRO AO INICIALIZAR BANCO: {e}")
+
+        raise
+
     finally:
+
         conn.close()
 
 
@@ -102,28 +128,34 @@ init_db()
 
 def agora():
     """
-    Retorna data/hora atual no formato:
-    17/09/2026 18:00:00
+    Retorna data/hora atual.
     """
-    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    return datetime.now().strftime(
+        "%d/%m/%Y %H:%M:%S"
+    )
 
 
 def normalizar_cnpj(cnpj: str):
     """
-    Remove pontuação do CNPJ.
-    Exemplo:
-    12.345.678/0001-90
-    vira
-    12345678000190
+    Remove pontos, barras e hífens do CNPJ.
     """
-    return "".join(filter(str.isdigit, cnpj))
+
+    return "".join(
+        caractere
+        for caractere in cnpj
+        if caractere.isdigit()
+    )
 
 
 def validar_cnpj(cnpj: str):
     """
-    Validação básica:
+    Validação básica do CNPJ.
+
+    Verifica:
+    - 14 dígitos
     - somente números
-    - exatamente 14 dígitos
+    - não permite sequência de números iguais
     """
 
     cnpj = normalizar_cnpj(cnpj)
@@ -134,18 +166,47 @@ def validar_cnpj(cnpj: str):
     if not cnpj.isdigit():
         return False
 
-    # Rejeita sequências como 00000000000000
     if len(set(cnpj)) == 1:
         return False
 
     return True
 
 
+def obter_nome_seguro(filename: str):
+    """
+    Obtém somente o nome do arquivo, eliminando
+    qualquer caminho enviado pelo cliente.
+
+    Exemplo:
+
+    ../../arquivo.zip
+
+    vira:
+
+    arquivo.zip
+    """
+
+    if not filename:
+        return ""
+
+    return Path(filename).name
+
+
+def obter_extensao(filename: str):
+    """
+    Retorna a extensão do arquivo em letras minúsculas.
+    """
+
+    return Path(filename).suffix.lower()
+
+
 def extensao_permitida(filename: str):
     """
-    Verifica a extensão do arquivo.
+    Verifica se a extensão está na lista permitida.
     """
-    extensao = Path(filename).suffix.lower()
+
+    extensao = obter_extensao(filename)
+
     return extensao in EXTENSOES_PERMITIDAS
 
 
@@ -159,9 +220,14 @@ async def home(request: Request):
     conn = get_connection()
 
     try:
-        lojas = conn.execute(
-            "SELECT cnpj, nome FROM lojas ORDER BY nome"
-        ).fetchall()
+
+        lojas = conn.execute("""
+            SELECT
+                cnpj,
+                nome
+            FROM lojas
+            ORDER BY nome
+        """).fetchall()
 
         pedidos = conn.execute("""
             SELECT
@@ -195,7 +261,7 @@ async def home(request: Request):
 
     except sqlite3.Error as e:
 
-        print(f"Erro ao carregar página inicial: {e}")
+        print(f"ERRO AO CARREGAR PÁGINA: {e}")
 
         raise HTTPException(
             status_code=500,
@@ -203,6 +269,7 @@ async def home(request: Request):
         )
 
     finally:
+
         conn.close()
 
 
@@ -219,14 +286,23 @@ async def cadastrar_loja(
     cnpj = normalizar_cnpj(cnpj)
     nome = nome.strip()
 
-    # Validação do CNPJ
+    # --------------------------------------------------------
+    # VALIDAR CNPJ
+    # --------------------------------------------------------
+
     if not validar_cnpj(cnpj):
+
         raise HTTPException(
             status_code=400,
             detail="CNPJ inválido. Informe um CNPJ com 14 dígitos."
         )
 
+    # --------------------------------------------------------
+    # VALIDAR NOME
+    # --------------------------------------------------------
+
     if not nome:
+
         raise HTTPException(
             status_code=400,
             detail="O nome da loja é obrigatório."
@@ -236,13 +312,16 @@ async def cadastrar_loja(
 
     try:
 
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO lojas (cnpj, nome)
+        conn.execute("""
+            INSERT OR REPLACE INTO lojas (
+                cnpj,
+                nome
+            )
             VALUES (?, ?)
-            """,
-            (cnpj, nome)
-        )
+        """, (
+            cnpj,
+            nome
+        ))
 
         conn.commit()
 
@@ -250,7 +329,7 @@ async def cadastrar_loja(
 
         conn.rollback()
 
-        print(f"Erro ao cadastrar loja: {e}")
+        print(f"ERRO AO CADASTRAR LOJA: {e}")
 
         raise HTTPException(
             status_code=500,
@@ -258,6 +337,7 @@ async def cadastrar_loja(
         )
 
     finally:
+
         conn.close()
 
     return RedirectResponse(
@@ -279,11 +359,12 @@ async def solicitar(
 
     cnpj = normalizar_cnpj(cnpj)
 
-    # ========================================================
-    # 1. Validar CNPJ
-    # ========================================================
+    # --------------------------------------------------------
+    # VALIDAR CNPJ
+    # --------------------------------------------------------
 
     if not validar_cnpj(cnpj):
+
         raise HTTPException(
             status_code=400,
             detail="CNPJ inválido."
@@ -293,35 +374,42 @@ async def solicitar(
 
     try:
 
-        # ====================================================
-        # 2. Verificar se a loja existe
-        # ====================================================
+        # ----------------------------------------------------
+        # VERIFICAR SE A LOJA EXISTE
+        # ----------------------------------------------------
 
-        loja = conn.execute(
-            "SELECT cnpj FROM lojas WHERE cnpj = ?",
-            (cnpj,)
-        ).fetchone()
+        loja = conn.execute("""
+            SELECT cnpj
+            FROM lojas
+            WHERE cnpj = ?
+        """, (
+            cnpj,
+        )).fetchone()
 
         if not loja:
+
             raise HTTPException(
                 status_code=404,
                 detail="Loja não cadastrada."
             )
 
-        # ====================================================
-        # 3. Criar UUID completo
-        # ====================================================
+        # ----------------------------------------------------
+        # GERAR ID COMPLETO
+        # ----------------------------------------------------
 
         pedido_id = str(uuid.uuid4())
 
-        # ====================================================
-        # 4. Registrar data de criação
-        # ====================================================
+        # ----------------------------------------------------
+        # DATA DE CRIAÇÃO
+        # ----------------------------------------------------
 
         criado_em = agora()
 
-        conn.execute(
-            """
+        # ----------------------------------------------------
+        # CRIAR PEDIDO
+        # ----------------------------------------------------
+
+        conn.execute("""
             INSERT INTO pedidos (
                 id,
                 cnpj,
@@ -332,26 +420,25 @@ async def solicitar(
                 concluido_em
             )
             VALUES (?, ?, ?, ?, 'PENDENTE', ?, NULL)
-            """,
-            (
-                pedido_id,
-                cnpj,
-                inicio,
-                fim,
-                criado_em
-            )
-        )
+        """, (
+            pedido_id,
+            cnpj,
+            inicio,
+            fim,
+            criado_em
+        ))
 
         conn.commit()
 
     except HTTPException:
+
         raise
 
     except sqlite3.Error as e:
 
         conn.rollback()
 
-        print(f"Erro ao criar pedido: {e}")
+        print(f"ERRO AO CRIAR PEDIDO: {e}")
 
         raise HTTPException(
             status_code=500,
@@ -359,6 +446,7 @@ async def solicitar(
         )
 
     finally:
+
         conn.close()
 
     return RedirectResponse(
@@ -368,7 +456,7 @@ async def solicitar(
 
 
 # ============================================================
-# CONSULTAR PEDIDO PENDENTE
+# CONSULTAR PEDIDO
 # ============================================================
 
 @app.get("/check/{cnpj}")
@@ -376,7 +464,12 @@ def check_pedido(cnpj: str):
 
     cnpj = normalizar_cnpj(cnpj)
 
+    # --------------------------------------------------------
+    # VALIDAR CNPJ
+    # --------------------------------------------------------
+
     if not validar_cnpj(cnpj):
+
         raise HTTPException(
             status_code=400,
             detail="CNPJ inválido."
@@ -396,7 +489,9 @@ def check_pedido(cnpj: str):
               AND status = 'PENDENTE'
             ORDER BY criado_em DESC
             LIMIT 1
-        """, (cnpj,)).fetchone()
+        """, (
+            cnpj,
+        )).fetchone()
 
         if pedido:
 
@@ -410,7 +505,7 @@ def check_pedido(cnpj: str):
 
     except sqlite3.Error as e:
 
-        print(f"Erro ao consultar pedido: {e}")
+        print(f"ERRO AO CONSULTAR PEDIDO: {e}")
 
         raise HTTPException(
             status_code=500,
@@ -418,6 +513,7 @@ def check_pedido(cnpj: str):
         )
 
     finally:
+
         conn.close()
 
 
@@ -434,43 +530,74 @@ async def upload(
 
     cnpj = normalizar_cnpj(cnpj)
 
-    # ========================================================
-    # 1. Validar CNPJ
-    # ========================================================
+    # --------------------------------------------------------
+    # VALIDAR CNPJ
+    # --------------------------------------------------------
 
     if not validar_cnpj(cnpj):
+
         raise HTTPException(
             status_code=400,
             detail="CNPJ inválido."
         )
 
-    # ========================================================
-    # 2. Verificar nome do arquivo
-    # ========================================================
+    # --------------------------------------------------------
+    # VALIDAR ARQUIVO
+    # --------------------------------------------------------
 
     if not file.filename:
+
         raise HTTPException(
             status_code=400,
             detail="Nenhum arquivo foi enviado."
         )
 
-    # ========================================================
-    # 3. Verificar extensão
-    # ========================================================
+    # --------------------------------------------------------
+    # OBTER NOME SEGURO
+    # --------------------------------------------------------
 
-    if not extensao_permitida(file.filename):
+    nome_original = obter_nome_seguro(
+        file.filename
+    )
+
+    if not nome_original:
+
         raise HTTPException(
             status_code=400,
-            detail="Tipo de arquivo não permitido."
+            detail="Nome de arquivo inválido."
         )
 
-    # ========================================================
-    # 4. Verificar pedido
-    # ========================================================
+    # --------------------------------------------------------
+    # VALIDAR EXTENSÃO
+    # --------------------------------------------------------
+
+    if not extensao_permitida(nome_original):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Tipo de arquivo não permitido. "
+                f"Extensões permitidas: "
+                f"{', '.join(sorted(EXTENSOES_PERMITIDAS))}"
+            )
+        )
+
+    extensao = obter_extensao(
+        nome_original
+    )
 
     conn = get_connection()
 
+    caminho_arquivo = None
+
     try:
+
+        # ----------------------------------------------------
+        # VERIFICAR PEDIDO
+        #
+        # IMPORTANTE:
+        # O pedido precisa pertencer ao CNPJ informado.
+        # ----------------------------------------------------
 
         pedido = conn.execute("""
             SELECT
@@ -490,43 +617,46 @@ async def upload(
 
             raise HTTPException(
                 status_code=404,
-                detail="Pedido não encontrado ou já concluído."
+                detail=(
+                    "Pedido não encontrado, "
+                    "não pertence a este CNPJ "
+                    "ou já foi concluído."
+                )
             )
 
-        # ====================================================
-        # 5. Nome seguro
-        # ====================================================
-
-        nome_original = secure_filename(file.filename)
-
-        if not nome_original:
-            raise HTTPException(
-                status_code=400,
-                detail="Nome de arquivo inválido."
-            )
-
-        extensao = Path(nome_original).suffix.lower()
-
-        # UUID garante que o nome físico nunca seja
-        # controlado diretamente pelo usuário.
+        # ----------------------------------------------------
+        # GERAR NOME DO ARQUIVO NO SERVIDOR
+        #
+        # O nome enviado pelo cliente NÃO é utilizado.
+        # ----------------------------------------------------
 
         nome_arquivo = (
             f"{cnpj}_{pedido_id}{extensao}"
         )
 
-        caminho_arquivo = PASTA_ARQUIVOS / nome_arquivo
+        caminho_arquivo = (
+            PASTA_ARQUIVOS / nome_arquivo
+        )
 
-        # ====================================================
-        # 6. Gravar arquivo
-        # ====================================================
+        # ----------------------------------------------------
+        # GRAVAR ARQUIVO
+        #
+        # Lê em blocos de 1 MB para não carregar
+        # o arquivo inteiro na memória.
+        # ----------------------------------------------------
 
         try:
 
-            with open(caminho_arquivo, "wb") as buffer:
+            with open(
+                caminho_arquivo,
+                "wb"
+            ) as buffer:
 
                 while True:
 
-                    bloco = await file.read(1024 * 1024)
+                    bloco = await file.read(
+                        1024 * 1024
+                    )
 
                     if not bloco:
                         break
@@ -535,20 +665,22 @@ async def upload(
 
         except OSError as e:
 
-            print(f"Erro ao salvar arquivo: {e}")
+            print(
+                f"ERRO AO SALVAR ARQUIVO: {e}"
+            )
 
             raise HTTPException(
                 status_code=500,
                 detail="Erro ao salvar arquivo."
             )
 
-        # ====================================================
-        # 7. Marcar pedido como concluído
-        # ====================================================
+        # ----------------------------------------------------
+        # MARCAR PEDIDO COMO CONCLUÍDO
+        # ----------------------------------------------------
 
         concluido_em = agora()
 
-        conn.execute("""
+        cursor = conn.execute("""
             UPDATE pedidos
             SET
                 status = 'CONCLUIDO',
@@ -562,6 +694,30 @@ async def upload(
             cnpj
         ))
 
+        # ----------------------------------------------------
+        # VERIFICAR SE O UPDATE REALMENTE OCORREU
+        # ----------------------------------------------------
+
+        if cursor.rowcount != 1:
+
+            conn.rollback()
+
+            # Remover arquivo que acabou de ser criado
+            if caminho_arquivo.exists():
+
+                try:
+                    caminho_arquivo.unlink()
+                except OSError:
+                    pass
+
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "O pedido não pôde ser concluído. "
+                    "Ele pode ter sido processado anteriormente."
+                )
+            )
+
         conn.commit()
 
         return {
@@ -571,31 +727,39 @@ async def upload(
         }
 
     except HTTPException:
+
         raise
 
     except sqlite3.Error as e:
 
         conn.rollback()
 
-        print(f"Erro no upload: {e}")
+        print(
+            f"ERRO NO BANCO DURANTE UPLOAD: {e}"
+        )
 
-        # Se o arquivo foi salvo mas ocorreu erro
-        # no banco, remove o arquivo para evitar
-        # deixar arquivo órfão.
+        # ----------------------------------------------------
+        # Se o arquivo foi criado mas o banco falhou,
+        # remove o arquivo para não deixar arquivo órfão.
+        # ----------------------------------------------------
 
-        if 'caminho_arquivo' in locals():
+        if caminho_arquivo:
+
             try:
+
                 if caminho_arquivo.exists():
                     caminho_arquivo.unlink()
+
             except OSError:
                 pass
 
         raise HTTPException(
             status_code=500,
-            detail="Erro ao registrar arquivo no banco."
+            detail="Erro ao registrar o arquivo no banco."
         )
 
     finally:
+
         conn.close()
 
 
@@ -606,37 +770,57 @@ async def upload(
 @app.get("/download/{filename}")
 def download(filename: str):
 
-    # ========================================================
-    # 1. Segurança: aceitar somente nome de arquivo
-    # ========================================================
+    # --------------------------------------------------------
+    # PEGAR SOMENTE O NOME DO ARQUIVO
+    # --------------------------------------------------------
 
-    nome_arquivo = os.path.basename(filename)
+    nome_arquivo = Path(filename).name
+
+    # Se o nome recebido contém caminho,
+    # rejeitar a requisição.
 
     if nome_arquivo != filename:
+
         raise HTTPException(
             status_code=400,
             detail="Nome de arquivo inválido."
         )
 
-    # ========================================================
-    # 2. Caminho seguro
-    # ========================================================
+    # --------------------------------------------------------
+    # CONSTRUIR CAMINHO
+    # --------------------------------------------------------
 
-    caminho = PASTA_ARQUIVOS / nome_arquivo
-
-    # Resolve o caminho para impedir acesso fora
-    # da pasta arquivos_recebidos.
+    caminho = (
+        PASTA_ARQUIVOS / nome_arquivo
+    )
 
     try:
 
         caminho_resolvido = caminho.resolve()
-        pasta_resolvida = PASTA_ARQUIVOS.resolve()
+        pasta_resolvida = (
+            PASTA_ARQUIVOS.resolve()
+        )
 
-        if pasta_resolvida not in caminho_resolvido.parents:
+        # ----------------------------------------------------
+        # GARANTIR QUE O ARQUIVO ESTÁ DENTRO DA PASTA
+        # ----------------------------------------------------
+
+        try:
+
+            caminho_resolvido.relative_to(
+                pasta_resolvida
+            )
+
+        except ValueError:
+
             raise HTTPException(
                 status_code=403,
                 detail="Acesso ao arquivo não permitido."
             )
+
+    except HTTPException:
+
+        raise
 
     except OSError:
 
@@ -645,24 +829,38 @@ def download(filename: str):
             detail="Caminho de arquivo inválido."
         )
 
-    # ========================================================
-    # 3. Verificar existência
-    # ========================================================
+    # --------------------------------------------------------
+    # VERIFICAR SE EXISTE
+    # --------------------------------------------------------
 
     if not caminho_resolvido.is_file():
+
         raise HTTPException(
             status_code=404,
             detail="Arquivo não encontrado."
         )
 
-    # ========================================================
-    # 4. Enviar arquivo
-    # ========================================================
+    # --------------------------------------------------------
+    # ENVIAR ARQUIVO
+    # --------------------------------------------------------
 
-    return FileResponse(
-        path=str(caminho_resolvido),
-        filename=nome_arquivo
-    )
+    try:
+
+        return FileResponse(
+            path=str(caminho_resolvido),
+            filename=nome_arquivo
+        )
+
+    except Exception as e:
+
+        print(
+            f"ERRO AO ENVIAR ARQUIVO: {e}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao enviar arquivo."
+        )
 
 
 # ============================================================
@@ -678,3 +876,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000
     )
+```
