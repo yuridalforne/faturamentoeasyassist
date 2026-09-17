@@ -1,4 +1,3 @@
-```python
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -876,4 +875,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000
     )
-```
